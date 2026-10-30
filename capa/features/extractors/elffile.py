@@ -20,6 +20,9 @@ from pathlib import Path
 from elftools.elf.dynamic import DynamicSegment
 from elftools.elf.elffile import ELFFile
 from elftools.elf.sections import Symbol, SymbolTableSection
+from elftools.elf.sections import Section as ELFSection
+from elftools.elf.segments import Segment
+from elftools.common.exceptions import ELFError
 
 import capa.features.extractors.common
 from capa.features.file import Export, Import, Section
@@ -48,8 +51,27 @@ def iter_dynamic_symbols(segment: DynamicSegment) -> Iterator[tuple[int, Symbol]
             logger.debug("failed to read dynamic symbol at index %d: %s", index, e)
 
 
+def iter_sections(elf: ELFFile) -> Iterator[ELFSection]:
+    # pyelftools raises when a section header references a missing section,
+    # e.g. via sh_link. Skip unreadable headers instead of aborting.
+    for index in range(elf.num_sections()):
+        try:
+            yield elf.get_section(index)
+        except (ELFError, AttributeError) as e:
+            logger.debug("failed to read section header at index %d: %s", index, e)
+
+
+def iter_segments(elf: ELFFile) -> Iterator[Segment]:
+    # constructing a segment may read section headers, which can be corrupt.
+    for index in range(elf.num_segments()):
+        try:
+            yield elf.get_segment(index)
+        except (ELFError, AttributeError) as e:
+            logger.debug("failed to read program header at index %d: %s", index, e)
+
+
 def extract_file_export_names(elf: ELFFile, **kwargs):
-    for section in elf.iter_sections():
+    for section in iter_sections(elf):
         if not isinstance(section, SymbolTableSection):
             continue
 
@@ -77,7 +99,7 @@ def extract_file_export_names(elf: ELFFile, **kwargs):
 
             yield Export(symbol.name), AbsoluteVirtualAddress(symbol.entry.st_value)
 
-    for segment in elf.iter_segments():
+    for segment in iter_segments(elf):
         if not isinstance(segment, DynamicSegment):
             continue
 
@@ -105,7 +127,7 @@ def extract_file_import_names(elf: ELFFile, **kwargs):
     symbol_name_by_index: dict[int, str] = {}
 
     # Extract symbol names and store them in the dictionary
-    for segment in elf.iter_segments():
+    for segment in iter_segments(elf):
         if not isinstance(segment, DynamicSegment):
             continue
 
@@ -130,7 +152,7 @@ def extract_file_import_names(elf: ELFFile, **kwargs):
 
             symbol_name_by_index[i] = symbol.name
 
-    for segment in elf.iter_segments():
+    for segment in iter_segments(elf):
         if not isinstance(segment, DynamicSegment):
             continue
 
@@ -167,7 +189,7 @@ def extract_file_import_names(elf: ELFFile, **kwargs):
 
 
 def extract_file_section_names(elf: ELFFile, **kwargs):
-    for section in elf.iter_sections():
+    for section in iter_sections(elf):
         if section.name:
             yield Section(section.name), AbsoluteVirtualAddress(section.header.sh_addr)
         elif section.is_null():
@@ -241,7 +263,7 @@ class ElfFeatureExtractor(StaticFeatureExtractor):
         self.elf = ELFFile(io.BytesIO(path.read_bytes()))
 
     def get_base_address(self):
-        for segment in self.elf.iter_segments():
+        for segment in iter_segments(self.elf):
             if segment.header.p_type == "PT_LOAD":
                 return AbsoluteVirtualAddress(segment.header.p_vaddr)
         return NO_ADDRESS

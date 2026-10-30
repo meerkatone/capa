@@ -19,7 +19,7 @@ from pathlib import Path
 import fixtures
 from elftools.elf.elffile import ELFFile
 
-from capa.features.file import Export
+from capa.features.file import Export, Section
 from capa.features.common import FORMAT_ELF, Format
 from capa.features.extractors.elffile import ElfFeatureExtractor, extract_file_export_names, extract_file_import_names
 
@@ -141,3 +141,41 @@ def test_elffile_invalid_utf8_dynamic_symbol_name(tmp_path: Path):
 
     assert any(isinstance(feature, Format) and feature.value == FORMAT_ELF for feature, _ in features)
     assert any(isinstance(feature, Export) and feature.value == "good" for feature, _ in features)
+
+
+def test_elffile_missing_shlink_section(tmp_path: Path):
+    # build a minimal ELF whose .dynamic section points its sh_link at a
+    # section header that doesn't exist (index 999).
+    shstrtab = b"\x00.text\x00.shstrtab\x00.dynamic\x00"
+    data = bytearray(0x200)
+    data[0:16] = b"\x7fELF\x02\x01\x01\x00" + bytes(8)
+    data[16:64] = (
+        struct.pack("<HHI", 2, 0x3E, 1)
+        + struct.pack("<QQQ", 0, 0, 0x100)
+        + struct.pack("<IHHHHHH", 0, 64, 56, 0, 64, 4, 2)
+    )
+    data[0x40 : 0x40 + len(shstrtab)] = shstrtab
+
+    def section_header(name, type_, flags, addr, offset, size, link, info, align, entsize):
+        return struct.pack("<IIQQQQIIQQ", name, type_, flags, addr, offset, size, link, info, align, entsize)
+
+    headers = [
+        section_header(0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+        section_header(1, 1, 6, 0x1000, 0, 0, 0, 0, 1, 0),
+        section_header(7, 3, 0, 0, 0x40, len(shstrtab), 0, 0, 1, 0),
+        section_header(17, 6, 0, 0, 0, 0, 999, 0, 8, 0),
+    ]
+    for index, header in enumerate(headers):
+        start = 0x100 + index * 64
+        data[start : start + 64] = header
+
+    path = tmp_path / "missing_shlink.elf"
+    path.write_bytes(bytes(data))
+
+    # capa must skip the unreadable section instead of aborting.
+    extractor = ElfFeatureExtractor(path)
+    features = list(extractor.extract_file_features())
+
+    assert any(isinstance(feature, Format) and feature.value == FORMAT_ELF for feature, _ in features)
+    assert any(isinstance(feature, Section) and feature.value == ".text" for feature, _ in features)
+    assert extractor.get_base_address() is not None
